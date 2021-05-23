@@ -40,8 +40,8 @@ decl_storage! {
 		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageDoubleMap.html
 		pub Kitties get(fn kitties): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) u32 => Option<Kitty>;
 		/// Stores parent ids, key is the child kitty id
-		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageDoubleMap.html
-		pub Parents get(fn parents): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) u32 => Option<(u32, u32)>;
+		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageMap.html
+		pub Parents get(fn parents): map hasher(blake2_128_concat) u32 => Option<(u32, u32)>;
 		/// Stores the next kitty ID
 		// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageValue.html
 		pub NextKittyId get(fn next_kitty_id): u32;
@@ -55,8 +55,11 @@ decl_event! {
 		/// A kitty is created. \[owner, kitty_id, kitty\]
 		KittyCreated(AccountId, u32, Kitty),
 
-		/// A kitty is bred. \[owner, kitty_child, momma_kitty, papa_kitty\]
+		/// A kitty is bred. \[owner, kitty_id, kitty_child, momma_kitty, papa_kitty\]
 		KittyBred(AccountId, u32, Kitty, Kitty, Kitty),
+
+		/// A kitty is transfered. \[owner, new_owner, kitty_id, kitty\]
+		KittyTransfered(AccountId, AccountId, u32, Kitty),
 	}
 }
 
@@ -138,7 +141,7 @@ decl_module! {
 				let child = Kitty(child_dna);
 
 				Kitties::<T>::insert(&sender, curr_id, child.clone());
-				Parents::<T>::insert(&sender, curr_id, (momma_id, poppa_id));
+				Parents::insert(curr_id, (momma_id, poppa_id));
 				NextKittyId::put(child_id);
 
 				frame_support::debug::RuntimeLogger::init();
@@ -150,6 +153,25 @@ decl_module! {
 			})?
 		}
 
+		/// Design transfer feature
+		/// a. kitty owner should be able to transfer kitty to someone else
+		#[weight = 1000]
+		pub fn transfer(origin, new_owner: T::AccountId, kitty_id: u32) -> DispatchResult {
+			let sender = ensure_signed(origin)?;
+			if sender == new_owner {
+				Ok(()) // noop
+			} else {
+				let kitty = Kitties::<T>::take(sender.clone(), kitty_id).ok_or(Error::<T>::KittyNotOwned)?;
+				Kitties::<T>::insert(new_owner.clone(), kitty_id, kitty.clone());
+
+				frame_support::debug::RuntimeLogger::init();
+				frame_support::debug::info!("##### transfer(): prev owner: {:?}, next owner: {:?}, kitty_id: {}, kitty: {:?}", sender.clone(), new_owner.clone(), kitty_id, kitty.clone());
+
+				Self::deposit_event(RawEvent::KittyTransfered(sender, new_owner, kitty_id, kitty));
+
+				Ok(()) // noop
+			}
+		}
 	}
 }
 

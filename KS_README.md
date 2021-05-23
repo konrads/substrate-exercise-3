@@ -9,7 +9,7 @@ cargo build
 
 To run built
 ```
-./target/debug/node-template --dev --tmp -lruntime=debug
+./target/debug/node-template --dev --tmp -lruntime=debug  # add for debug logs: -ldebug
 ```
 
 To expand macros, useful for understanding macro internals.

@@ -37,10 +37,13 @@ pub trait Config: frame_system::Config {
 decl_storage! {
 	trait Store for Module<T: Config> as Kitties {
 		/// Stores all the kitties, key is the kitty id
+		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageDoubleMap.html
 		pub Kitties get(fn kitties): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) u32 => Option<Kitty>;
-		/// Stores parents
+		/// Stores parent ids, key is the child kitty id
+		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageDoubleMap.html
 		pub Parents get(fn parents): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) u32 => Option<(u32, u32)>;
 		/// Stores the next kitty ID
+		// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageValue.html
 		pub NextKittyId get(fn next_kitty_id): u32;
 	}
 }
@@ -60,7 +63,7 @@ decl_event! {
 decl_error! {
 	pub enum Error for Module<T: Config> {
 		KittiesIdOverflow,
-		KittyNotOwned, // get error if use (u32) param: ^ no rules expected this token in macro call
+		KittyNotOwned, // Note: decl_error! doesn't allow for parametrized Enum values, ie. will get error if use a param er (u32): ^ no rules expected this token in macro call
 		KittiesBredFromSameGenderCouple,
 	}
 }
@@ -77,12 +80,11 @@ decl_module! {
 			let sender = ensure_signed(origin)?;
 
 			// ensure no id overflow
-			// FIXME: ks - try_mutate - how would i know that?
 			NextKittyId::try_mutate(|curr_id_ref| -> DispatchResult {
 				let curr_id = *curr_id_ref;
 
+				// FIXME: discover how using_encoded() works on such tuple...
 				// Generate a random 128bit value
-				// FIXME: ks - using_encoded() on a tuple?
 				let payload = (
 					<pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed(),
 					&sender,
@@ -92,7 +94,7 @@ decl_module! {
 
 				// Create and store kitty
 				let kitty = Kitty(dna);
-				// FIXME: ks - is also available on Self::kitties? how?
+				// note, setter isn't created as part of doublemap decl_storage!
 				Kitties::<T>::insert(&sender, curr_id, kitty.clone());
 
 				let next_kitty_id = curr_id.checked_add(1).ok_or(Error::<T>::KittiesIdOverflow)?;
@@ -100,6 +102,9 @@ decl_module! {
 				NextKittyId::put(next_kitty_id);
 				// Emit event
 				Self::deposit_event(RawEvent::KittyCreated(sender, next_kitty_id, kitty));
+
+				frame_support::debug::RuntimeLogger::init();
+				frame_support::debug::info!("##### create(): dna: {:?}, next_kitty_id: {}", dna, next_kitty_id);
 
 				Ok(())
 			})?
@@ -120,6 +125,7 @@ decl_module! {
 			// obtain child dna from parents' dnas
 			let mixer: [u8; 16] = <pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed().using_encoded(blake2_128);
 			let child_dna: [u8; 16] = mix_dna(mixer, momma.0, pappa.0);
+			// ensure recording tuple order: momma, pappa
 			let (momma_id, poppa_id) = if parent1.get_gender() == Gender::Female {
 				(parent1_id, parent2_id)
 			} else {
@@ -134,6 +140,10 @@ decl_module! {
 				Kitties::<T>::insert(&sender, curr_id, child.clone());
 				Parents::<T>::insert(&sender, curr_id, (momma_id, poppa_id));
 				NextKittyId::put(child_id);
+
+				frame_support::debug::RuntimeLogger::init();
+				frame_support::debug::info!("##### breed(): child dna: {:?}, momma_id: {}, poppa_id: {}", child_dna, momma_id, poppa_id);
+
 				Self::deposit_event(RawEvent::KittyBred(sender, child_id, child, (*momma).clone(), (*pappa).clone()));
 
 				Ok(())
@@ -175,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn mix_get_femae_male_test() {
+    fn mix_get_female_male_test() {
 		let male = Kitty([2u8; 16]);
 		let female = Kitty([1u8; 16]);
 		assert_eq!(Some((&female, &male)), get_female_male(&male, &female));

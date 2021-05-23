@@ -11,3 +11,8 @@
 
 # The cache for chain data in container
 .local
+
+.idea/
+pallets/kitties/kitties.rs
+runtime.rs
+template.rs

@@ -4,15 +4,15 @@
 //
 use codec::{Encode, Decode};
 use frame_support::{
-	decl_module, decl_storage, decl_event, decl_error, ensure, StorageValue, StorageDoubleMap,
+	decl_module, decl_storage, decl_event, decl_error, StorageValue, StorageDoubleMap,
 	traits::Randomness, RuntimeDebug,
 };
-use frame_support::dispatch::DispatchResult;
+use frame_support::dispatch::{DispatchError, DispatchResult};
 use sp_io::hashing::blake2_128;
 use frame_system::ensure_signed;
 
 // #[derive(Encode, Decode, Clone, Copy, RuntimeDebug, PartialEq, Eq)]
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, RuntimeDebug)]
 enum Gender {
     Male,
     Female
@@ -79,38 +79,28 @@ decl_module! {
 
 		/// Create a new kitty
 		#[weight = 1000]
-		pub fn create(origin) {
+		pub fn create(origin) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 
 			// ensure no id overflow
-			NextKittyId::try_mutate(|curr_id_ref| -> DispatchResult {
-				let curr_id = *curr_id_ref;
+			let kitty_id = Self::get_next_kitty_id()?;
 
-				// FIXME: discover how using_encoded() works on such tuple...
-				// Generate a random 128bit value
-				let payload = (
-					<pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed(),
-					&sender,
-					<frame_system::Module<T>>::extrinsic_index(),
-				);
-				let dna = payload.using_encoded(blake2_128);
+			// FIXME: discover how using_encoded() works on such tuple...
+			// Generate a random 128bit value
+			let dna = Self::random_value(&sender);
 
-				// Create and store kitty
-				let kitty = Kitty(dna);
-				// note, setter isn't created as part of doublemap decl_storage!
-				Kitties::<T>::insert(&sender, curr_id, kitty.clone());
+			// Create and store kitty
+			let kitty = Kitty(dna);
+			// note, setter isn't created as part of doublemap decl_storage!
+			Kitties::<T>::insert(&sender, kitty_id, kitty.clone());
 
-				let next_kitty_id = curr_id.checked_add(1).ok_or(Error::<T>::KittiesIdOverflow)?;
-				*curr_id_ref = next_kitty_id;
-				NextKittyId::put(next_kitty_id);
-				// Emit event
-				Self::deposit_event(RawEvent::KittyCreated(sender, next_kitty_id, kitty));
+			// Emit event
+			Self::deposit_event(RawEvent::KittyCreated(sender, kitty_id, kitty));
 
-				frame_support::debug::RuntimeLogger::init();
-				frame_support::debug::info!("##### create(): dna: {:?}, next_kitty_id: {}", dna, next_kitty_id);
+			frame_support::debug::RuntimeLogger::init();
+			frame_support::debug::info!("##### create(): dna: {:?}, next_kitty_id: {}", dna, kitty_id);
 
-				Ok(())
-			})?
+			Ok(())
 		}
 
 		/// Design breed feature for kitties pallet
@@ -119,14 +109,16 @@ decl_module! {
         /// b. Kitty owner can choose two kitties with opposite gender to breed a new kitten
         /// c. New kitten should inherits the DNA from parents
 		#[weight = 1000]
-		pub fn breed(origin, parent1_id: u32, parent2_id: u32) {
+		pub fn breed(origin, parent1_id: u32, parent2_id: u32) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 			let parent1 = Self::kitties(&sender, parent1_id).ok_or(Error::<T>::KittyNotOwned)?;
 			let parent2 = Self::kitties(&sender, parent2_id).ok_or(Error::<T>::KittyNotOwned)?;
 			let (momma, pappa) = get_female_male(&parent1, &parent2).ok_or(Error::<T>::KittiesBredFromSameGenderCouple)?;
 
+			let child_id = Self::get_next_kitty_id()?;
+
 			// obtain child dna from parents' dnas
-			let mixer: [u8; 16] = <pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed().using_encoded(blake2_128);
+			let mixer: [u8; 16] = Self::random_value(&sender);
 			let child_dna: [u8; 16] = mix_dna(mixer, momma.0, pappa.0);
 			// ensure recording tuple order: momma, pappa
 			let (momma_id, poppa_id) = if parent1.get_gender() == Gender::Female {
@@ -135,22 +127,16 @@ decl_module! {
 				(parent2_id, parent1_id)
 			};
 
-			NextKittyId::try_mutate(|curr_id_ref| -> DispatchResult {
-				let curr_id = *curr_id_ref;
-				let child_id = curr_id.checked_add(1).ok_or(Error::<T>::KittiesIdOverflow)?;
-				let child = Kitty(child_dna);
+			let child = Kitty(child_dna);
+			Kitties::<T>::insert(&sender, child_id, child.clone());
+			Parents::insert(child_id, (momma_id, poppa_id));
 
-				Kitties::<T>::insert(&sender, curr_id, child.clone());
-				Parents::insert(curr_id, (momma_id, poppa_id));
-				NextKittyId::put(child_id);
+			frame_support::debug::RuntimeLogger::init();
+			frame_support::debug::info!("##### breed(): child dna: {:?}, momma_id: {}, poppa_id: {}", child_dna, momma_id, poppa_id);
 
-				frame_support::debug::RuntimeLogger::init();
-				frame_support::debug::info!("##### breed(): child dna: {:?}, momma_id: {}, poppa_id: {}", child_dna, momma_id, poppa_id);
+			Self::deposit_event(RawEvent::KittyBred(sender, child_id, child, (*momma).clone(), (*pappa).clone()));
 
-				Self::deposit_event(RawEvent::KittyBred(sender, child_id, child, (*momma).clone(), (*pappa).clone()));
-
-				Ok(())
-			})?
+			Ok(())
 		}
 
 		/// Design transfer feature
@@ -158,20 +144,41 @@ decl_module! {
 		#[weight = 1000]
 		pub fn transfer(origin, new_owner: T::AccountId, kitty_id: u32) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
-			if sender == new_owner {
-				Ok(()) // noop
-			} else {
-				let kitty = Kitties::<T>::take(sender.clone(), kitty_id).ok_or(Error::<T>::KittyNotOwned)?;
-				Kitties::<T>::insert(new_owner.clone(), kitty_id, kitty.clone());
-
-				frame_support::debug::RuntimeLogger::init();
-				frame_support::debug::info!("##### transfer(): prev owner: {:?}, next owner: {:?}, kitty_id: {}, kitty: {:?}", sender.clone(), new_owner.clone(), kitty_id, kitty.clone());
-
-				Self::deposit_event(RawEvent::KittyTransfered(sender, new_owner, kitty_id, kitty));
-
-				Ok(()) // noop
-			}
+			Kitties::<T>::try_mutate_exists(sender.clone(), kitty_id, |kitty| -> DispatchResult {
+				if sender == new_owner && kitty.is_some() {
+					Ok(())					
+				} else {
+					match kitty.take() {
+						None    => Err(Error::<T>::KittyNotOwned.into()),
+						Some(k) => {
+							Kitties::<T>::insert(&new_owner, kitty_id, k.clone());
+							Self::deposit_event(RawEvent::KittyTransfered(sender, new_owner, kitty_id, k));
+							Ok(())
+						}
+					}
+				}
+			})
 		}
+	}
+}
+
+// from Bryan's answers
+impl<T: Config> Module<T> {
+	fn get_next_kitty_id() -> sp_std::result::Result<u32, DispatchError> {
+		NextKittyId::try_mutate(|next_id| -> sp_std::result::Result<u32, DispatchError> {
+			let current_id = *next_id;
+			*next_id = next_id.checked_add(1).ok_or(Error::<T>::KittiesIdOverflow)?;
+			Ok(current_id)
+		})
+	}
+
+	fn random_value(sender: &T::AccountId) -> [u8; 16] {
+		let payload = (
+			<pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed(),
+			&sender,
+			<frame_system::Module<T>>::extrinsic_index(),
+		);
+		payload.using_encoded(blake2_128)
 	}
 }
 
@@ -192,27 +199,4 @@ fn mix_dna(mixer: [u8; 16], dna1: [u8; 16], dna2: [u8; 16]) -> [u8; 16] {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mix_dna_test() {
-        let dna1: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let dna2: [u8; 16] = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116];
-        assert_eq!(dna1, mix_dna([0u8; 16], dna1, dna2));
-        assert_eq!(dna2, mix_dna([255u8; 16], dna1, dna2));
-        assert_eq!(
-			[1, 102, 3, 104, 5, 106, 7, 108, 9, 110, 11, 112, 13, 114, 15, 116],
-			mix_dna([0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8], dna1, dna2));
-    }
-
-    #[test]
-    fn mix_get_female_male_test() {
-		let male = Kitty([2u8; 16]);
-		let female = Kitty([1u8; 16]);
-		assert_eq!(Some((&female, &male)), get_female_male(&male, &female));
-		assert_eq!(Some((&female, &male)), get_female_male(&female, &male));
-		assert_eq!(None, get_female_male(&female, &female));
-		assert_eq!(None, get_female_male(&male, &male));
-    }
-}
+mod tests;

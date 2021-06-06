@@ -17,6 +17,7 @@ frame_support::construct_runtime!(
 		UncheckedExtrinsic = UncheckedExtrinsic,
 	{
 		System: frame_system::{Module, Call, Config, Storage, Event<T>},
+		Balances: pallet_balances::{Module, Call, Storage, Config<T>, Event<T>},
 		KittiesModule: kitties::{Module, Call, Storage, Event<T>},
 	}
 );
@@ -44,20 +45,41 @@ impl frame_system::Config for Test {
 	type BlockHashCount = BlockHashCount;
 	type Version = ();
 	type PalletInfo = PalletInfo;
-	type AccountData = ();
+	type AccountData = pallet_balances::AccountData<u64>;
 	type OnNewAccount = ();
 	type OnKilledAccount = ();
 	type SystemWeightInfo = ();
 	type SS58Prefix = SS58Prefix;
 }
 
+parameter_types! {
+	pub const ExistentialDeposit: u64 = 1;
+}
+impl pallet_balances::Config for Test {
+	type MaxLocks = ();
+	type Balance = u64;
+	type Event = Event;
+	type DustRemoval = ();
+	type ExistentialDeposit = ExistentialDeposit;
+	type AccountStore = System;
+	type WeightInfo = ();
+}
+
 impl Config for Test {
 	type Event = Event;
+	type Currency = Balances;
 }
 
 // Build genesis storage according to the mock runtime.
 pub fn new_test_ext() -> sp_io::TestExternalities {
-    let mut t: sp_io::TestExternalities = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap().into();
+    let mut t= frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
+	pallet_balances::GenesisConfig::<Test>{
+		balances: vec![
+			(100, 100),  // me with balance of 100
+			(200, 200),  // poor with balance of 200
+			(300, 300),  // rich with balance of 300
+	]}.assimilate_storage(&mut t).unwrap();
+	let mut t: sp_io::TestExternalities = t.into();
     t.execute_with(|| System::set_block_number(1) );
     t
 }
@@ -130,10 +152,75 @@ fn transfer_test() {
 
 		// valid transfer to another, expect move of kitty and event
 		assert_ok!(KittiesModule::transfer(me.clone(), another_id, 0));
-		assert!(KittiesModule::kitties(me_id, 0).is_none());
+		assert_eq!(KittiesModule::kitties(me_id, 0), None);
 		let kitty3 = KittiesModule::kitties(another_id, 0).unwrap();
 		assert_eq!(kitty1, kitty3);
 		assert_eq!(last_event(), Some(Event::kitties(crate::Event::<Test>::KittyTransfered(me_id, another_id, 0, kitty3))));
+	});
+}
+
+#[test]
+fn set_price_test() {
+    new_test_ext().execute_with(|| {
+		let me_id = 100;
+		let me = Origin::signed(me_id);
+		let another_id = 101;
+		// Kitties::<Test>::insert(me_id, 0, Kitty([1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6])); // enter raw storage - note - other creation items (next_id) aren't updated...
+		// or preferred:
+		assert_ok!(KittiesModule::create(me.clone()));
+		assert_ok!(KittiesModule::set_price(me.clone(), 0, None));
+		assert_eq!(last_event(), Some(Event::kitties(RawEvent::KittyPriceSet(100, 0, None))));  // set it to None (was None, but still, want to send notification of success)
+		assert_eq!(Prices::<Test>::get(0), None);
+
+		assert_ok!(KittiesModule::set_price(me.clone(), 0, Some(100_u64)));
+		assert_eq!(last_event(), Some(Event::kitties(RawEvent::KittyPriceSet(100, 0, Some(100_u64)))));
+		assert_eq!(Prices::<Test>::get(0), Some(100_u64));
+
+		// set price on someone else's kitty
+		assert_noop!(KittiesModule::set_price(me.clone(), another_id, None), Error::<Test>::KittyNotOwned);
+		assert_eq!(Prices::<Test>::get(0), Some(100_u64));
+	});
+}
+
+#[test]
+fn set_buy() {
+    new_test_ext().execute_with(|| {
+		let me_id = 100;
+		let me = Origin::signed(me_id);
+		let poor_buyer = 200;
+		let rich_buyer = 300;
+
+		assert_ok!(KittiesModule::create(me.clone()));
+
+		// try to buy unpriced kitty
+		assert_noop!(KittiesModule::buy(me.clone(), poor_buyer, 0, 250), Error::<Test>::KittyNotForSale);
+
+		// try to buy non existant kitty
+		assert_noop!(KittiesModule::buy(me.clone(), poor_buyer, 10, 250), Error::<Test>::KittyNotOwned);
+
+		// try to buy below price
+		assert_ok!(KittiesModule::set_price(me.clone(), 0, Some(200)));
+		assert_noop!(KittiesModule::buy(me.clone(), poor_buyer, 0, 10), Error::<Test>::KittyPriceTooLow);
+
+		// fail to buy due to depleting balance to 0
+		assert_ok!(KittiesModule::set_price(me.clone(), 0, Some(200)));
+		assert_noop!(KittiesModule::buy(me.clone(), poor_buyer, 0, 1000), pallet_balances::Error::<Test, _>::KeepAlive);
+
+		// fail to buy due depleting the balance < 0
+		assert_ok!(KittiesModule::set_price(me.clone(), 0, Some(250)));
+		assert_eq!(Prices::<Test>::get(0), Some(250));
+		assert_noop!(KittiesModule::buy(me.clone(), poor_buyer, 0, 1000), pallet_balances::Error::<Test, _>::InsufficientBalance);
+
+		// buy ok! and not be able to buy again due to kitty being unpriced post transfer
+		assert_ok!(KittiesModule::buy(me.clone(), rich_buyer, 0, 1000));
+		assert_eq!(last_event(), Some(Event::kitties(RawEvent::KittyBought(100, rich_buyer, 0, 250))));
+		assert_eq!(Prices::<Test>::get(0), None);
+		assert!(! Kitties::<Test>::contains_key(me_id, 0));
+		assert!(! Kitties::<Test>::contains_key(poor_buyer, 0));
+		assert!(Kitties::<Test>::contains_key(rich_buyer, 0));
+		assert_eq!(Balances::free_balance(me_id), 350);
+		assert_eq!(Balances::free_balance(poor_buyer), 200);
+		assert_eq!(Balances::free_balance(rich_buyer), 50);
 	});
 }
 

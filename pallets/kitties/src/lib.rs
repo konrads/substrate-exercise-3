@@ -2,15 +2,17 @@
 
 // mod kitties;
 //
+use std::fmt;
 use codec::{Encode, Decode};
 use frame_support::{
-	decl_module, decl_storage, decl_event, decl_error, StorageValue, StorageDoubleMap,
+	decl_module, decl_storage, decl_event, decl_error, StorageValue, StorageDoubleMap, Parameter,
 	traits::{Randomness, Currency, ExistenceRequirement}, ensure,
 	RuntimeDebug,
 };
 use frame_support::dispatch::{DispatchError, DispatchResult};
 use sp_io::hashing::blake2_128;
 use frame_system::ensure_signed;
+use sp_runtime::traits::{AtLeast32BitUnsigned, Bounded, One, CheckedAdd};
 
 // #[derive(Encode, Decode, Clone, Copy, RuntimeDebug, PartialEq, Eq)]
 #[derive(PartialEq, Eq, RuntimeDebug)]
@@ -34,6 +36,8 @@ impl Kitty {
 pub trait Config: pallet_balances::Config {
 	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
 	type Currency: Currency<Self::AccountId>;
+	// type Randomness: Randomness<Self::Hash>;
+	type KittyIndex: Parameter + AtLeast32BitUnsigned + Bounded + Default + Copy + fmt::Display;
 }
 
 //type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -43,14 +47,14 @@ decl_storage! {
 	trait Store for Module<T: Config> as Kitties {
 		/// Stores all the kitties, key is the kitty id
 		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageDoubleMap.html
-		pub Kitties get(fn kitties): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) u32 => Option<Kitty>;
+		pub Kitties get(fn kitties): double_map hasher(blake2_128_concat) T::AccountId, hasher(blake2_128_concat) T::KittyIndex => Option<Kitty>;
 		/// Stores parent ids, key is the child kitty id
 		/// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageMap.html
-		pub Parents get(fn parents): map hasher(blake2_128_concat) u32 => Option<(u32, u32)>;
-		pub Prices get(fn prices): map hasher(blake2_128_concat) u32 => Option<BalanceOf<T>>;
+		pub Parents get(fn parents): map hasher(blake2_128_concat) T::KittyIndex => Option<(T::KittyIndex, T::KittyIndex)>;
+		pub Prices get(fn prices): map hasher(blake2_128_concat) T::KittyIndex => Option<BalanceOf<T>>;
 		/// Stores the next kitty ID
 		// Implemented via https://substrate.dev/rustdocs/v3.0.0/frame_support/storage/trait.StorageValue.html
-		pub NextKittyId get(fn next_kitty_id): u32;
+		pub NextKittyId get(fn next_kitty_id): T::KittyIndex;
 	}
 }
 
@@ -58,21 +62,22 @@ decl_event! {
 	pub enum Event<T> where
 		<T as frame_system::Config>::AccountId,
 		Balance = BalanceOf<T>,
+		<T as Config>::KittyIndex,
 	{
 		/// A kitty is created. \[owner, kitty_id, kitty\]
-		KittyCreated(AccountId, u32, Kitty),
+		KittyCreated(AccountId, KittyIndex, Kitty),
 
 		/// A kitty is bred. \[owner, kitty_id, kitty_child, momma_kitty, papa_kitty\]
-		KittyBred(AccountId, u32, Kitty, Kitty, Kitty),
+		KittyBred(AccountId, KittyIndex, Kitty, Kitty, Kitty),
 
 		/// A kitty is transfered. \[owner, new_owner, kitty_id, kitty\]
-		KittyTransfered(AccountId, AccountId, u32, Kitty),
+		KittyTransfered(AccountId, AccountId, KittyIndex, Kitty),
 
 		/// A kitty price is set. \[owner, kitty_id, price\]
-		KittyPriceSet(AccountId, u32, Option<Balance>),
+		KittyPriceSet(AccountId, KittyIndex, Option<Balance>),
 
 		/// A kitty is bought. \[owner, new_owner, kitty_id, price\]
-		KittyBought(AccountId, AccountId, u32, Balance),
+		KittyBought(AccountId, AccountId, KittyIndex, Balance),
 	}
 }
 
@@ -124,7 +129,7 @@ decl_module! {
         /// b. Kitty owner can choose two kitties with opposite gender to breed a new kitten
         /// c. New kitten should inherits the DNA from parents
 		#[weight = 1000]
-		pub fn breed(origin, parent1_id: u32, parent2_id: u32) -> DispatchResult {
+		pub fn breed(origin, parent1_id: T::KittyIndex, parent2_id: T::KittyIndex) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 			let parent1 = Self::kitties(&sender, parent1_id).ok_or(Error::<T>::KittyNotOwned)?;
 			let parent2 = Self::kitties(&sender, parent2_id).ok_or(Error::<T>::KittyNotOwned)?;
@@ -144,7 +149,7 @@ decl_module! {
 
 			let child = Kitty(child_dna);
 			Kitties::<T>::insert(&sender, child_id, child.clone());
-			Parents::insert(child_id, (momma_id, poppa_id));
+			Parents::<T>::insert(child_id, (momma_id, poppa_id));
 
 			frame_support::debug::RuntimeLogger::init();
 			frame_support::debug::info!("##### breed(): child dna: {:?}, momma_id: {}, poppa_id: {}", child_dna, momma_id, poppa_id);
@@ -157,7 +162,7 @@ decl_module! {
 		/// Design transfer feature
 		/// a. kitty owner should be able to transfer kitty to someone else
 		#[weight = 1000]
-		pub fn transfer(origin, new_owner: T::AccountId, kitty_id: u32) -> DispatchResult {
+		pub fn transfer(origin, new_owner: T::AccountId, kitty_id: T::KittyIndex) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 			Kitties::<T>::try_mutate_exists(sender.clone(), kitty_id, |kitty| -> DispatchResult {
 				if sender == new_owner && kitty.is_some() {
@@ -177,7 +182,7 @@ decl_module! {
 		}
 
 		#[weight = 1000]
-		pub fn set_price(origin, kitty_id: u32, new_price: Option<BalanceOf<T>>) -> DispatchResult {
+		pub fn set_price(origin, kitty_id: T::KittyIndex, new_price: Option<BalanceOf<T>>) -> DispatchResult {
 			// bryan's impl
 			let sender = ensure_signed(origin)?;
 			ensure!(Kitties::<T>::contains_key(&sender, kitty_id), Error::<T>::KittyNotOwned);  // more performant than fetch cause no serialization
@@ -199,7 +204,7 @@ decl_module! {
 		}
 
 		#[weight = 1000]
-		pub fn buy(origin, new_owner: T::AccountId, kitty_id: u32, max_bid: BalanceOf<T>) -> DispatchResult {
+		pub fn buy(origin, new_owner: T::AccountId, kitty_id: T::KittyIndex, max_bid: BalanceOf<T>) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 
 			// transfer if prices are below max bid
@@ -221,10 +226,10 @@ decl_module! {
 
 // from Bryan's answers
 impl<T: Config> Module<T> {
-	fn get_next_kitty_id() -> sp_std::result::Result<u32, DispatchError> {
-		NextKittyId::try_mutate(|next_id| -> sp_std::result::Result<u32, DispatchError> {
+	fn get_next_kitty_id() -> sp_std::result::Result<T::KittyIndex, DispatchError> {
+		NextKittyId::<T>::try_mutate(|next_id| -> sp_std::result::Result<T::KittyIndex, DispatchError> {
 			let current_id = *next_id;
-			*next_id = next_id.checked_add(1).ok_or(Error::<T>::KittiesIdOverflow)?;
+			*next_id = next_id.checked_add(&One::one()).ok_or(Error::<T>::KittiesIdOverflow)?;
 			Ok(current_id)
 		})
 	}

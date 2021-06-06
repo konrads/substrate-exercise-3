@@ -68,6 +68,7 @@ impl pallet_balances::Config for Test {
 impl Config for Test {
 	type Event = Event;
 	type Currency = Balances;
+	type KittyIndex = u32;
 }
 
 // Build genesis storage according to the mock runtime.

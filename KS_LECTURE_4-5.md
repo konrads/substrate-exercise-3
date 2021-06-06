@@ -7,6 +7,8 @@ Refactorings with typing
 
 transfer()
 ==========
+* set_price()
+* buy()
 
 Hot-deployment
 ==============
@@ -14,7 +16,7 @@ Hot-deployment
 Metadata
 ========
 In polkadot.js.org/#apps/rpc -> state -> getMetadata()
-- see extinsic calls together with documentation `/// blah` and parameter names, types
+* see extinsic calls together with documentation `/// blah` and parameter names, types
 
 On-chain storage
 ================
@@ -63,4 +65,4 @@ This week's assignment:
 
 QQQ
 ===
-* can extrinsics return anything?
+* can extrinsics return anything? - No! look for events, asyncly...

@@ -36,7 +36,7 @@ impl Kitty {
 pub trait Config: pallet_balances::Config {
 	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
 	type Currency: Currency<Self::AccountId>;
-	// type Randomness: Randomness<Self::Hash>;
+	type Randomness: Randomness<Self::Hash>;
 	type KittyIndex: Parameter + AtLeast32BitUnsigned + Bounded + Default + Copy + fmt::Display;
 }
 
@@ -236,7 +236,8 @@ impl<T: Config> Module<T> {
 
 	fn random_value(sender: &T::AccountId) -> [u8; 16] {
 		let payload = (
-			<pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed(),
+			T::Randomness::random_seed(),
+			// <pallet_randomness_collective_flip::Module<T> as Randomness<T::Hash>>::random_seed(),
 			&sender,
 			<frame_system::Module<T>>::extrinsic_index(),
 		);

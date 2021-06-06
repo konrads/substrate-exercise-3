@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 use crate as kitties;
 use sp_core::H256;
 use frame_support::{parameter_types, assert_ok, assert_noop};
@@ -65,10 +66,30 @@ impl pallet_balances::Config for Test {
 	type WeightInfo = ();
 }
 
+// setup "randomness"
+thread_local! {
+    static RANDOM_PAYLOAD: RefCell<H256> = RefCell::new(Default::default());
+}
+
+pub struct MockRandom;
+
+impl Randomness<H256> for MockRandom {
+    fn random(_subject: &[u8]) -> H256 {
+        RANDOM_PAYLOAD.with(|v| *v.borrow())
+    }
+}
+
+fn set_random(val: H256) {
+    RANDOM_PAYLOAD.with(|v| *v.borrow_mut() = val)
+}
+
+
+
 impl Config for Test {
 	type Event = Event;
 	type Currency = Balances;
 	type KittyIndex = u32;
+	type Randomness = MockRandom;
 }
 
 // Build genesis storage according to the mock runtime.
@@ -107,6 +128,7 @@ fn can_create_test() {
 fn can_breed_test() {
     new_test_ext().execute_with(|| {
         assert_ok!(KittiesModule::create(Origin::signed(100)));
+		set_random(H256::from([2; 32]));
         assert_eq!(KittiesModule::next_kitty_id(), 1);
 
 		// bumps extrinsic index for the next DNA generation
@@ -122,7 +144,8 @@ fn can_breed_test() {
         assert_ok!(KittiesModule::breed(Origin::signed(100), 0, 1));
         assert_eq!(KittiesModule::next_kitty_id(), 3);
 
-        let kitty = Kitty([59, 254, 219, 122, 245, 239, 191, 125, 255, 239, 247, 247, 251, 239, 247, 254]);
+        // old way, with inbuilt randomness: let kitty = Kitty([59, 254, 219, 122, 245, 239, 191, 125, 255, 239, 247, 247, 251, 239, 247, 254]);
+		let kitty = Kitty([187, 254, 239, 222, 215, 167, 173, 111, 247, 254, 255, 189, 239, 186, 115, 123]);
 
         assert_eq!(KittiesModule::kitties(100, 2), Some(kitty.clone()));
 
